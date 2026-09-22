@@ -1,0 +1,406 @@
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import struct
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense
+from tensorflow.keras.optimizers import Adam
+from sklearn.linear_model import Lasso
+
+np.random.seed(42)
+tf.random.set_seed(42)
+
+DATA_PATH = r"C:\Users\Tintu\OneDrive\Desktop\NPOL"
+
+N = 784
+M = 196
+
+TRAIN_SAMPLES = 10000
+TEST_SAMPLES = 50
+
+EPOCHS = 20
+BATCH_SIZE = 64
+
+LASSO_ALPHA = 0.001
+
+SBL_ITERATIONS = 20
+SBL_NOISE = 0.001
+
+
+def load_mnist_images(filename):
+    with open(filename, "rb") as f:
+        magic, num, rows, cols = struct.unpack(">IIII", f.read(16))
+        data = np.frombuffer(f.read(), dtype=np.uint8)
+
+    images = data.reshape(num, rows * cols)
+    return images.astype(np.float32) / 255.0
+
+
+x_train = load_mnist_images(
+    DATA_PATH + r"\train-images.idx3-ubyte"
+)
+
+x_test = load_mnist_images(
+    DATA_PATH + r"\t10k-images.idx3-ubyte"
+)
+
+x_train = x_train[:TRAIN_SAMPLES]
+x_test = x_test[:TEST_SAMPLES]
+
+
+A = np.random.randn(M, N).astype(np.float32) / np.sqrt(M)
+
+
+y_train = x_train @ A.T
+y_test = x_test @ A.T
+
+
+generator_input = Input(shape=(M,))
+
+g = Dense(256, activation="relu")(generator_input)
+g = Dense(512, activation="relu")(g)
+generator_output = Dense(N, activation="sigmoid")(g)
+
+generator = Model(generator_input, generator_output)
+
+
+discriminator_input = Input(shape=(N,))
+
+d = Dense(512, activation="relu")(discriminator_input)
+d = Dense(256, activation="relu")(d)
+discriminator_output = Dense(1, activation="sigmoid")(d)
+
+discriminator = Model(discriminator_input, discriminator_output)
+
+
+optimizer_g = Adam(learning_rate=0.0002)
+optimizer_d = Adam(learning_rate=0.0002)
+
+bce = tf.keras.losses.BinaryCrossentropy()
+
+
+for epoch in range(EPOCHS):
+
+    indices = np.random.permutation(len(x_train))
+
+    for start in range(0, len(x_train), BATCH_SIZE):
+
+        batch_indices = indices[start:start + BATCH_SIZE]
+
+        real_images = tf.convert_to_tensor(
+            x_train[batch_indices],
+            dtype=tf.float32
+        )
+
+        measurements = tf.convert_to_tensor(
+            y_train[batch_indices],
+            dtype=tf.float32
+        )
+
+        with tf.GradientTape() as tape_d:
+
+            fake_images = generator(
+                measurements,
+                training=True
+            )
+
+            real_output = discriminator(
+                real_images,
+                training=True
+            )
+
+            fake_output = discriminator(
+                fake_images,
+                training=True
+            )
+
+            real_loss = bce(
+                tf.ones_like(real_output),
+                real_output
+            )
+
+            fake_loss = bce(
+                tf.zeros_like(fake_output),
+                fake_output
+            )
+
+            d_loss = real_loss + fake_loss
+
+        gradients_d = tape_d.gradient(
+            d_loss,
+            discriminator.trainable_variables
+        )
+
+        optimizer_d.apply_gradients(
+            zip(
+                gradients_d,
+                discriminator.trainable_variables
+            )
+        )
+
+        with tf.GradientTape() as tape_g:
+
+            reconstructed = generator(
+                measurements,
+                training=True
+            )
+
+            fake_output = discriminator(
+                reconstructed,
+                training=True
+            )
+
+            reconstruction_loss = tf.reduce_mean(
+                tf.square(real_images - reconstructed)
+            )
+
+            adversarial_loss = bce(
+                tf.ones_like(fake_output),
+                fake_output
+            )
+
+            g_loss = reconstruction_loss + 0.001 * adversarial_loss
+
+        gradients_g = tape_g.gradient(
+            g_loss,
+            generator.trainable_variables
+        )
+
+        optimizer_g.apply_gradients(
+            zip(
+                gradients_g,
+                generator.trainable_variables
+            )
+        )
+
+
+gan_reconstructed = generator(
+    y_test,
+    training=False
+).numpy()
+
+
+gan_reconstructed = np.clip(
+    gan_reconstructed,
+    0,
+    1
+)
+
+
+gan_error = x_test - gan_reconstructed
+
+gan_mse = np.mean(
+    np.square(gan_error)
+)
+
+gan_nmse = (
+    np.sum(np.square(gan_error))
+    /
+    np.sum(np.square(x_test))
+)
+
+gan_nmse_db = 10 * np.log10(gan_nmse)
+
+
+lasso_reconstructed = np.zeros_like(x_test)
+
+
+for i in range(TEST_SAMPLES):
+
+    model = Lasso(
+        alpha=LASSO_ALPHA,
+        fit_intercept=False,
+        max_iter=5000
+    )
+
+    model.fit(
+        A,
+        y_test[i]
+    )
+
+    lasso_reconstructed[i] = model.coef_
+
+
+lasso_reconstructed = np.clip(
+    lasso_reconstructed,
+    0,
+    1
+)
+
+
+lasso_error = x_test - lasso_reconstructed
+
+lasso_mse = np.mean(
+    np.square(lasso_error)
+)
+
+lasso_nmse = (
+    np.sum(np.square(lasso_error))
+    /
+    np.sum(np.square(x_test))
+)
+
+lasso_nmse_db = 10 * np.log10(
+    lasso_nmse
+)
+
+
+def sbl_reconstruction(A, y):
+
+    M, N = A.shape
+
+    gamma = np.ones(N)
+
+    x = np.zeros(N)
+
+    for iteration in range(SBL_ITERATIONS):
+
+        C = (
+            (A * gamma) @ A.T
+            +
+            SBL_NOISE * np.eye(M)
+        )
+
+        try:
+            C_inv_y = np.linalg.solve(
+                C,
+                y
+            )
+
+        except np.linalg.LinAlgError:
+            C_inv_y = np.linalg.pinv(C) @ y
+
+        x = gamma * A.T @ C_inv_y
+
+        try:
+            C_inv_A = np.linalg.solve(
+                C,
+                A
+            )
+
+        except np.linalg.LinAlgError:
+            C_inv_A = np.linalg.pinv(C) @ A
+
+        variance = gamma - (
+            gamma ** 2
+            *
+            np.sum(
+                A * C_inv_A.T,
+                axis=0
+            )
+        )
+
+        variance = np.maximum(
+            variance,
+            1e-12
+        )
+
+        gamma = (
+            x ** 2
+            +
+            variance
+        )
+
+        gamma = np.maximum(
+            gamma,
+            1e-12
+        )
+
+    return np.clip(x, 0, 1)
+
+
+sbl_reconstructed = np.zeros_like(x_test)
+
+
+for i in range(TEST_SAMPLES):
+
+    sbl_reconstructed[i] = sbl_reconstruction(
+        A,
+        y_test[i]
+    )
+
+
+sbl_error = x_test - sbl_reconstructed
+
+sbl_mse = np.mean(
+    np.square(sbl_error)
+)
+
+sbl_nmse = (
+    np.sum(np.square(sbl_error))
+    /
+    np.sum(np.square(x_test))
+)
+
+sbl_nmse_db = 10 * np.log10(
+    sbl_nmse
+)
+
+
+print()
+print("GAN Results")
+print("----------------------")
+print("Average MSE:", gan_mse)
+print("Average NMSE:", gan_nmse)
+print("Average NMSE(dB):", gan_nmse_db)
+
+print()
+print("LASSO Results")
+print("----------------------")
+print("Average MSE:", lasso_mse)
+print("Average NMSE:", lasso_nmse)
+print("Average NMSE(dB):", lasso_nmse_db)
+
+print()
+print("SBL Results")
+print("----------------------")
+print("Average MSE:", sbl_mse)
+print("Average NMSE:", sbl_nmse)
+print("Average NMSE(dB):", sbl_nmse_db)
+
+
+methods = [
+    "GAN",
+    "LASSO",
+    "SBL"
+]
+
+nmse_db_values = [
+    gan_nmse_db,
+    lasso_nmse_db,
+    sbl_nmse_db
+]
+
+
+plt.figure(figsize=(9, 6))
+
+plt.plot(
+    methods,
+    nmse_db_values,
+    marker="o",
+    linewidth=2,
+    markersize=8
+)
+
+for i, value in enumerate(nmse_db_values):
+
+    plt.text(
+        i,
+        value,
+        f"{value:.2f} dB",
+        ha="center",
+        va="bottom"
+    )
+
+plt.xlabel("Reconstruction Method")
+plt.ylabel("Average NMSE (dB)")
+
+plt.title(
+    "Comparison of GAN, LASSO and SBL"
+)
+
+plt.grid(True)
+
+plt.tight_layout()
+
+plt.show()
