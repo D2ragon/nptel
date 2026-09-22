@@ -1,507 +1,986 @@
 import numpy as np
+import tensorflow as tf
 import matplotlib.pyplot as plt
 import struct
-from scipy.fft import dct, idct
-from sklearn.linear_model import Lasso
-import csv
 
-IMAGE_PATH = r"C:\Users\Tintu\OneDrive\Desktop\NPOL\train-images.idx3-ubyte"
+from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.optimizers import Adam
+from sklearn.linear_model import Lasso
+
+np.random.seed(42)
+tf.random.set_seed(42)
+
+DATA_PATH = r"C:\Users\Tintu\OneDrive\Desktop\NPOL"
 
 N = 784
-M = 200
-NUM_TEST_IMAGES = 20
+M = 196
+
+TRAIN_SAMPLES = 10000
+TEST_SAMPLES = 50
+
+EPOCHS = 20
+BATCH_SIZE = 64
 
 LASSO_ALPHA = 0.001
 
-SBL_ITERATIONS = 50
+SBL_ITERATIONS = 20
 SBL_NOISE = 0.001
 
-DNN_MSE = 0.005
-DNN_NMSE = 0.05
-DNN_DB = 10 * np.log10(DNN_NMSE)
 
-np.random.seed(42)
+def load_images(filename):
 
+    with open(filename, "rb") as f:
 
-def load_mnist_images(path):
-    with open(path, "rb") as f:
-        magic, num_images, rows, cols = struct.unpack(">IIII", f.read(16))
+        magic, num, rows, cols = struct.unpack(
+            ">IIII",
+            f.read(16)
+        )
+
         data = np.frombuffer(
-            f.read(num_images * rows * cols),
+            f.read(),
             dtype=np.uint8
         )
 
-    images = data.reshape(num_images, rows * cols)
-    images = images.astype(np.float32) / 255.0
-
-    return images
+        return data.reshape(num, rows, cols)
 
 
-def create_measurement_matrix(M, N):
-    A = np.random.randn(M, N)
-    A = A / np.linalg.norm(A, axis=1, keepdims=True)
-    return A
+def load_labels(filename):
 
+    with open(filename, "rb") as f:
 
-def dct_transform(x):
-    return dct(x, norm="ortho")
+        magic, num = struct.unpack(
+            ">II",
+            f.read(8)
+        )
 
+        data = np.frombuffer(
+            f.read(),
+            dtype=np.uint8
+        )
 
-def idct_transform(x):
-    return idct(x, norm="ortho")
-
-
-def lasso_reconstruction(y, A):
-    model = Lasso(
-        alpha=LASSO_ALPHA,
-        max_iter=5000,
-        fit_intercept=False
-    )
-
-    model.fit(A, y)
-
-    return model.coef_
-
-
-def sbl_reconstruction(y, A, iterations=50, noise=0.001):
-
-    M, N = A.shape
-
-    gamma = np.ones(N)
-
-    for iteration in range(iterations):
-
-        Gamma = np.diag(gamma)
-
-        Sigma_y = A @ Gamma @ A.T + noise * np.eye(M)
-
-        try:
-            Sigma_y_inv = np.linalg.inv(Sigma_y)
-        except np.linalg.LinAlgError:
-            Sigma_y_inv = np.linalg.pinv(Sigma_y)
-
-        mu = Gamma @ A.T @ Sigma_y_inv @ y
-
-        Sigma_x = Gamma - Gamma @ A.T @ Sigma_y_inv @ A @ Gamma
-
-        gamma_new = mu ** 2 + np.diag(Sigma_x)
-
-        gamma_new = np.maximum(gamma_new, 1e-10)
-
-        difference = np.linalg.norm(gamma_new - gamma)
-
-        gamma = gamma_new
-
-        if difference < 1e-6:
-            break
-
-    return mu
-
-
-def calculate_metrics(original, reconstructed):
-
-    error = original - reconstructed
-
-    mse = np.mean(error ** 2)
-
-    original_energy = np.mean(original ** 2)
-
-    nmse = mse / (original_energy + 1e-12)
-
-    db = 10 * np.log10(nmse + 1e-12)
-
-    psnr = 10 * np.log10(
-        1.0 / (mse + 1e-12)
-    )
-
-    return mse, nmse, db, psnr
-
-
-def calculate_sparsity(x):
-
-    threshold = 1e-3
-
-    zero_values = np.sum(np.abs(x) < threshold)
-
-    return 100 * zero_values / len(x)
+        return data
 
 
 print("Loading MNIST...")
 
-images = load_mnist_images(IMAGE_PATH)
+x_train = load_images(
+    DATA_PATH + r"\train-images.idx3-ubyte"
+)
 
-print("Total images:", len(images))
-print("Image size:", images.shape[1])
+y_train_labels = load_labels(
+    DATA_PATH + r"\train-labels.idx1-ubyte"
+)
+
+x_test = load_images(
+    DATA_PATH + r"\t10k-images.idx3-ubyte"
+)
+
+y_test_labels = load_labels(
+    DATA_PATH + r"\t10k-labels.idx1-ubyte"
+)
+
+print("Full training data:", x_train.shape)
+print("Testing data:", x_test.shape)
+
+x_train = x_train[:TRAIN_SAMPLES]
+
+x_train = x_train.astype("float32") / 255.0
+x_test = x_test.astype("float32") / 255.0
+
+x_train = x_train.reshape(-1, 784)
+x_test = x_test.reshape(-1, 784)
+
+x_test_used = x_test[:TEST_SAMPLES]
+
+print("Training data used:", x_train.shape)
+print("Testing data used:", x_test_used.shape)
+
+print("Creating measurement matrix...")
+
+A = (
+    np.random.randn(M, N)
+    .astype("float32")
+    / np.sqrt(M)
+)
+
+print("Measurement matrix A:", A.shape)
+
+print("Creating measurements...")
+
+y_train = x_train @ A.T
+y_test = x_test_used @ A.T
+
+print("Compressed training data:", y_train.shape)
+print("Compressed testing data:", y_test.shape)
+
+print("Creating Generator...")
+
+generator = tf.keras.Sequential([
+
+    Input(shape=(M,)),
+
+    Dense(
+        256,
+        activation="relu"
+    ),
+
+    Dense(
+        512,
+        activation="relu"
+    ),
+
+    Dense(
+        784,
+        activation="sigmoid"
+    )
+])
 
 
-A = create_measurement_matrix(M, N)
+print("Creating Discriminator...")
 
-print()
-print("Measurement matrix created")
-print("N =", N)
-print("M =", M)
-print("Compression ratio =", M / N)
+discriminator = tf.keras.Sequential([
 
+    Input(shape=(784,)),
 
-lasso_mse = []
-lasso_nmse = []
-lasso_db = []
-lasso_psnr = []
+    Dense(
+        512,
+        activation="relu"
+    ),
 
-sbl_mse = []
-sbl_nmse = []
-sbl_db = []
-sbl_psnr = []
+    Dense(
+        256,
+        activation="relu"
+    ),
 
-original_images = []
-lasso_images = []
-sbl_images = []
-measurement_images = []
+    Dense(
+        1,
+        activation="sigmoid"
+    )
+])
 
 
-print()
-print("Starting reconstruction...")
-print("----------------------------------------")
+g_optimizer = Adam(
+    learning_rate=0.0002
+)
+
+d_optimizer = Adam(
+    learning_rate=0.0002
+)
+
+bce = tf.keras.losses.BinaryCrossentropy()
 
 
-for i in range(NUM_TEST_IMAGES):
+@tf.function
+def train_step(
+    measurements,
+    real_images
+):
 
-    x_original = images[i]
+    with tf.GradientTape() as d_tape:
 
-    x_dct = dct_transform(x_original)
+        fake_images = generator(
+            measurements,
+            training=True
+        )
 
-    y = A @ x_dct
+        real_output = discriminator(
+            real_images,
+            training=True
+        )
 
-    x_lasso_dct = lasso_reconstruction(
-        y,
-        A
+        fake_output = discriminator(
+            fake_images,
+            training=True
+        )
+
+        d_real_loss = bce(
+            tf.ones_like(real_output),
+            real_output
+        )
+
+        d_fake_loss = bce(
+            tf.zeros_like(fake_output),
+            fake_output
+        )
+
+        d_loss = (
+            d_real_loss +
+            d_fake_loss
+        )
+
+    d_gradients = d_tape.gradient(
+        d_loss,
+        discriminator.trainable_variables
     )
 
-    x_sbl_dct = sbl_reconstruction(
-        y,
-        A,
-        SBL_ITERATIONS,
-        SBL_NOISE
+    d_optimizer.apply_gradients(
+        zip(
+            d_gradients,
+            discriminator.trainable_variables
+        )
     )
 
-    x_lasso = idct_transform(
-        x_lasso_dct
+    with tf.GradientTape() as g_tape:
+
+        fake_images = generator(
+            measurements,
+            training=True
+        )
+
+        fake_output = discriminator(
+            fake_images,
+            training=True
+        )
+
+        reconstruction_loss = tf.reduce_mean(
+            tf.square(
+                real_images -
+                fake_images
+            )
+        )
+
+        adversarial_loss = bce(
+            tf.ones_like(fake_output),
+            fake_output
+        )
+
+        g_loss = (
+            reconstruction_loss +
+            0.001 *
+            adversarial_loss
+        )
+
+    g_gradients = g_tape.gradient(
+        g_loss,
+        generator.trainable_variables
     )
 
-    x_sbl = idct_transform(
-        x_sbl_dct
+    g_optimizer.apply_gradients(
+        zip(
+            g_gradients,
+            generator.trainable_variables
+        )
     )
 
-    x_lasso = np.clip(
-        x_lasso,
-        0,
-        1
+    return (
+        d_loss,
+        g_loss,
+        reconstruction_loss
     )
 
-    x_sbl = np.clip(
-        x_sbl,
-        0,
-        1
+
+print("Creating dataset...")
+
+dataset = tf.data.Dataset.from_tensor_slices(
+    (
+        y_train,
+        x_train
+    )
+)
+
+dataset = dataset.shuffle(
+    10000
+).batch(
+    BATCH_SIZE
+)
+
+print("Starting GAN training...")
+
+nmse_db_history = []
+mse_history = []
+
+for epoch in range(EPOCHS):
+
+    d_losses = []
+    g_losses = []
+    reconstruction_losses = []
+    nmse_values = []
+
+    for measurements, real_images in dataset:
+
+        d_loss, g_loss, rec_loss = train_step(
+            measurements,
+            real_images
+        )
+
+        d_losses.append(
+            d_loss.numpy()
+        )
+
+        g_losses.append(
+            g_loss.numpy()
+        )
+
+        reconstruction_losses.append(
+            rec_loss.numpy()
+        )
+
+        fake_images = generator(
+            measurements,
+            training=False
+        )
+
+        error = tf.reduce_sum(
+            tf.square(
+                real_images -
+                fake_images
+            )
+        )
+
+        signal = tf.reduce_sum(
+            tf.square(
+                real_images
+            )
+        )
+
+        nmse = error / signal
+
+        nmse_values.append(
+            nmse.numpy()
+        )
+
+    epoch_mse = np.mean(
+        reconstruction_losses
     )
 
-    mse1, nmse1, db1, psnr1 = calculate_metrics(
-        x_original,
-        x_lasso
+    epoch_nmse = np.mean(
+        nmse_values
     )
 
-    mse2, nmse2, db2, psnr2 = calculate_metrics(
-        x_original,
-        x_sbl
+    epoch_nmse_db = (
+        10 *
+        np.log10(
+            epoch_nmse
+        )
     )
 
-    lasso_mse.append(mse1)
-    lasso_nmse.append(nmse1)
-    lasso_db.append(db1)
-    lasso_psnr.append(psnr1)
+    mse_history.append(
+        epoch_mse
+    )
 
-    sbl_mse.append(mse2)
-    sbl_nmse.append(nmse2)
-    sbl_db.append(db2)
-    sbl_psnr.append(psnr2)
-
-    original_images.append(x_original)
-    lasso_images.append(x_lasso)
-    sbl_images.append(x_sbl)
-
-    measurement_images.append(
-        y
+    nmse_db_history.append(
+        epoch_nmse_db
     )
 
     print(
-        "Image",
-        i + 1,
-        "| LASSO MSE:",
-        round(mse1, 6),
-        "| SBL MSE:",
-        round(mse2, 6)
+        "Epoch",
+        epoch + 1,
+        "/",
+        EPOCHS,
+        "| D Loss:",
+        round(
+            np.mean(d_losses),
+            6
+        ),
+        "| G Loss:",
+        round(
+            np.mean(g_losses),
+            6
+        ),
+        "| MSE:",
+        round(
+            epoch_mse,
+            6
+        ),
+        "| NMSE (dB):",
+        round(
+            epoch_nmse_db,
+            3
+        )
     )
 
 
 print()
-print("========================================")
-print("FINAL RESULTS")
-print("========================================")
+print("GAN training completed.")
 
-avg_lasso_mse = np.mean(lasso_mse)
-avg_lasso_nmse = np.mean(lasso_nmse)
-avg_lasso_db = 10 * np.log10(avg_lasso_nmse)
-avg_lasso_psnr = np.mean(lasso_psnr)
 
-avg_sbl_mse = np.mean(sbl_mse)
-avg_sbl_nmse = np.mean(sbl_nmse)
-avg_sbl_db = 10 * np.log10(avg_sbl_nmse)
-avg_sbl_psnr = np.mean(sbl_psnr)
+print()
+print("Generating GAN reconstructions...")
+
+gan_reconstructed = generator(
+    y_test,
+    training=False
+).numpy()
+
+
+gan_error = np.sum(
+    (
+        x_test_used -
+        gan_reconstructed
+    ) ** 2
+)
+
+gan_signal = np.sum(
+    x_test_used ** 2
+)
+
+gan_mse = np.mean(
+    (
+        x_test_used -
+        gan_reconstructed
+    ) ** 2
+)
+
+gan_nmse = (
+    gan_error /
+    gan_signal
+)
+
+gan_nmse_db = (
+    10 *
+    np.log10(
+        gan_nmse
+    )
+)
+
+
+print()
+print("GAN Results")
+print("----------------------")
+print("Average MSE:", gan_mse)
+print("Average NMSE:", gan_nmse)
+print("Average NMSE(dB):", gan_nmse_db)
+
+
+print()
+print("Running LASSO...")
+
+lasso_reconstructed = np.zeros(
+    (TEST_SAMPLES, N)
+)
+
+for i in range(TEST_SAMPLES):
+
+    model = Lasso(
+        alpha=LASSO_ALPHA,
+        fit_intercept=False,
+        max_iter=5000
+    )
+
+    model.fit(
+        A,
+        y_test[i]
+    )
+
+    lasso_reconstructed[i] = model.coef_
+
+    if (i + 1) % 10 == 0:
+
+        print(
+            "LASSO image",
+            i + 1,
+            "/",
+            TEST_SAMPLES
+        )
+
+
+lasso_mse = np.mean(
+    (
+        x_test_used -
+        lasso_reconstructed
+    ) ** 2
+)
+
+lasso_error = np.sum(
+    (
+        x_test_used -
+        lasso_reconstructed
+    ) ** 2
+)
+
+lasso_signal = np.sum(
+    x_test_used ** 2
+)
+
+lasso_nmse = (
+    lasso_error /
+    lasso_signal
+)
+
+lasso_nmse_db = (
+    10 *
+    np.log10(
+        lasso_nmse
+    )
+)
 
 
 print()
 print("LASSO Results")
 print("----------------------")
-print("M:", M)
-print("N:", N)
-print("Average MSE:", avg_lasso_mse)
-print("Average NMSE:", avg_lasso_nmse)
-print("Average dB:", avg_lasso_db)
-print("Average PSNR:", avg_lasso_psnr)
+print("Average MSE:", lasso_mse)
+print("Average NMSE:", lasso_nmse)
+print("Average NMSE(dB):", lasso_nmse_db)
+
+
+def sbl_reconstruction(
+    A,
+    y,
+    iterations=20,
+    noise=0.001
+):
+
+    M_local, N_local = A.shape
+
+    gamma = np.ones(
+        N_local,
+        dtype=np.float64
+    )
+
+    A_double = A.astype(
+        np.float64
+    )
+
+    y_double = y.astype(
+        np.float64
+    )
+
+    for iteration in range(iterations):
+
+        AG = A_double * gamma
+
+        C = (
+            AG @ A_double.T
+            +
+            noise *
+            np.eye(M_local)
+        )
+
+        try:
+
+            C_inv_y = np.linalg.solve(
+                C,
+                y_double
+            )
+
+        except np.linalg.LinAlgError:
+
+            C = C + 1e-6 * np.eye(M_local)
+
+            C_inv_y = np.linalg.solve(
+                C,
+                y_double
+            )
+
+        x = (
+            gamma *
+            (
+                A_double.T @ C_inv_y
+            )
+        )
+
+        try:
+
+            C_inv_A = np.linalg.solve(
+                C,
+                A_double
+            )
+
+        except np.linalg.LinAlgError:
+
+            C = C + 1e-6 * np.eye(M_local)
+
+            C_inv_A = np.linalg.solve(
+                C,
+                A_double
+            )
+
+        posterior_variance = (
+            gamma -
+            gamma *
+            gamma *
+            np.sum(
+                A_double *
+                C_inv_A,
+                axis=0
+            )
+        )
+
+        posterior_variance = np.maximum(
+            posterior_variance,
+            0
+        )
+
+        gamma_new = (
+            x ** 2 +
+            posterior_variance
+        )
+
+        gamma_new = np.maximum(
+            gamma_new,
+            1e-12
+        )
+
+        if np.linalg.norm(
+            gamma_new - gamma
+        ) / (
+            np.linalg.norm(gamma) + 1e-12
+        ) < 1e-4:
+
+            gamma = gamma_new
+
+            break
+
+        gamma = gamma_new
+
+    x = np.clip(
+        x,
+        0,
+        1
+    )
+
+    return x.astype(
+        np.float32
+    )
+
+
+print()
+print("Running SBL...")
+
+sbl_reconstructed = np.zeros(
+    (TEST_SAMPLES, N),
+    dtype=np.float32
+)
+
+for i in range(TEST_SAMPLES):
+
+    sbl_reconstructed[i] = sbl_reconstruction(
+        A,
+        y_test[i],
+        SBL_ITERATIONS,
+        SBL_NOISE
+    )
+
+    print(
+        "SBL image",
+        i + 1,
+        "/",
+        TEST_SAMPLES
+    )
+
+
+sbl_mse = np.mean(
+    (
+        x_test_used -
+        sbl_reconstructed
+    ) ** 2
+)
+
+sbl_error = np.sum(
+    (
+        x_test_used -
+        sbl_reconstructed
+    ) ** 2
+)
+
+sbl_signal = np.sum(
+    x_test_used ** 2
+)
+
+sbl_nmse = (
+    sbl_error /
+    sbl_signal
+)
+
+sbl_nmse_db = (
+    10 *
+    np.log10(
+        sbl_nmse
+    )
+)
 
 
 print()
 print("SBL Results")
 print("----------------------")
-print("M:", M)
-print("N:", N)
-print("Average MSE:", avg_sbl_mse)
-print("Average NMSE:", avg_sbl_nmse)
-print("Average dB:", avg_sbl_db)
-print("Average PSNR:", avg_sbl_psnr)
+print("Average MSE:", sbl_mse)
+print("Average NMSE:", sbl_nmse)
+print("Average NMSE(dB):", sbl_nmse_db)
 
 
 print()
-print("DNN/GAN Results")
-print("----------------------")
-print("MSE:", DNN_MSE)
-print("NMSE:", DNN_NMSE)
-print("dB:", DNN_DB)
-
+print("===================================")
+print("FINAL COMPARISON")
+print("===================================")
 
 print()
-print("========================================")
-print("COMPARISON")
-print("========================================")
-
-print()
-print("Method       MSE          NMSE         dB")
-print("--------------------------------------------")
-
+print("Method       MSE          NMSE        NMSE(dB)")
 print(
-    "LASSO   ",
-    round(avg_lasso_mse, 6),
-    round(avg_lasso_nmse, 6),
-    round(avg_lasso_db, 4)
+    "GAN       ",
+    round(gan_mse, 6),
+    " ",
+    round(gan_nmse, 6),
+    " ",
+    round(gan_nmse_db, 3)
 )
 
 print(
-    "SBL     ",
-    round(avg_sbl_mse, 6),
-    round(avg_sbl_nmse, 6),
-    round(avg_sbl_db, 4)
+    "LASSO     ",
+    round(lasso_mse, 6),
+    " ",
+    round(lasso_nmse, 6),
+    " ",
+    round(lasso_nmse_db, 3)
 )
 
 print(
-    "DNN/GAN ",
-    round(DNN_MSE, 6),
-    round(DNN_NMSE, 6),
-    round(DNN_DB, 4)
+    "SBL       ",
+    round(sbl_mse, 6),
+    " ",
+    round(sbl_nmse, 6),
+    " ",
+    round(sbl_nmse_db, 3)
 )
-
-
-plt.figure(figsize=(12, 4))
-
-plt.subplot(1, 4, 1)
-
-plt.imshow(
-    original_images[0].reshape(28, 28),
-    cmap="gray"
-)
-
-plt.title("Original")
-plt.axis("off")
-
-
-plt.subplot(1, 4, 2)
-
-plt.plot(
-    measurement_images[0]
-)
-
-plt.title("Measurement y = Ax")
-plt.xlabel("Measurement index")
-plt.ylabel("Value")
-
-
-plt.subplot(1, 4, 3)
-
-plt.imshow(
-    lasso_images[0].reshape(28, 28),
-    cmap="gray"
-)
-
-plt.title("LASSO")
-plt.axis("off")
-
-
-plt.subplot(1, 4, 4)
-
-plt.imshow(
-    sbl_images[0].reshape(28, 28),
-    cmap="gray"
-)
-
-plt.title("SBL")
-plt.axis("off")
-
-
-plt.tight_layout()
-plt.show()
 
 
 methods = [
+    "GAN",
     "LASSO",
-    "SBL",
-    "DNN/GAN"
+    "SBL"
 ]
 
 mse_values = [
-    avg_lasso_mse,
-    avg_sbl_mse,
-    DNN_MSE
+    gan_mse,
+    lasso_mse,
+    sbl_mse
+]
+
+nmse_values = [
+    gan_nmse,
+    lasso_nmse,
+    sbl_nmse
+]
+
+nmse_db_values = [
+    gan_nmse_db,
+    lasso_nmse_db,
+    sbl_nmse_db
 ]
 
 
-plt.figure(figsize=(7, 5))
+plt.figure(
+    figsize=(7, 5)
+)
 
 plt.bar(
     methods,
     mse_values
 )
 
-plt.ylabel("Average MSE")
-plt.title("Reconstruction MSE Comparison")
+plt.xlabel(
+    "Method"
+)
 
-plt.tight_layout()
+plt.ylabel(
+    "Average MSE"
+)
+
+plt.title(
+    "GAN vs LASSO vs SBL - MSE"
+)
+
+plt.grid(
+    axis="y"
+)
+
 plt.show()
 
 
-nmse_values = [
-    avg_lasso_nmse,
-    avg_sbl_nmse,
-    DNN_NMSE
-]
-
-
-plt.figure(figsize=(7, 5))
+plt.figure(
+    figsize=(7, 5)
+)
 
 plt.bar(
     methods,
     nmse_values
 )
 
-plt.ylabel("Average NMSE")
-plt.title("Reconstruction NMSE Comparison")
+plt.xlabel(
+    "Method"
+)
 
-plt.tight_layout()
+plt.ylabel(
+    "Average NMSE"
+)
+
+plt.title(
+    "GAN vs LASSO vs SBL - NMSE"
+)
+
+plt.grid(
+    axis="y"
+)
+
 plt.show()
 
 
-db_values = [
-    avg_lasso_db,
-    avg_sbl_db,
-    DNN_DB
-]
-
-
-plt.figure(figsize=(7, 5))
+plt.figure(
+    figsize=(7, 5)
+)
 
 plt.bar(
     methods,
-    db_values
+    nmse_db_values
 )
 
-plt.ylabel("NMSE (dB)")
-plt.title("Reconstruction Error in dB")
+plt.xlabel(
+    "Method"
+)
 
-plt.tight_layout()
+plt.ylabel(
+    "NMSE (dB)"
+)
+
+plt.title(
+    "GAN vs LASSO vs SBL - NMSE (dB)"
+)
+
+plt.grid(
+    axis="y"
+)
+
 plt.show()
 
 
-plt.figure(figsize=(8, 5))
+index = 0
 
-plt.plot(
-    range(1, NUM_TEST_IMAGES + 1),
-    lasso_mse,
-    marker="o",
-    label="LASSO"
+plt.figure(
+    figsize=(12, 3)
+)
+
+plt.subplot(
+    1,
+    4,
+    1
+)
+
+plt.imshow(
+    x_test_used[index].reshape(28, 28),
+    cmap="gray"
+)
+
+plt.title(
+    "Original"
+)
+
+plt.axis(
+    "off"
+)
+
+
+plt.subplot(
+    1,
+    4,
+    2
+)
+
+plt.imshow(
+    gan_reconstructed[index].reshape(28, 28),
+    cmap="gray"
+)
+
+plt.title(
+    "GAN"
+)
+
+plt.axis(
+    "off"
+)
+
+
+plt.subplot(
+    1,
+    4,
+    3
+)
+
+plt.imshow(
+    lasso_reconstructed[index].reshape(28, 28),
+    cmap="gray"
+)
+
+plt.title(
+    "LASSO"
+)
+
+plt.axis(
+    "off"
+)
+
+
+plt.subplot(
+    1,
+    4,
+    4
+)
+
+plt.imshow(
+    sbl_reconstructed[index].reshape(28, 28),
+    cmap="gray"
+)
+
+plt.title(
+    "SBL"
+)
+
+plt.axis(
+    "off"
+)
+
+plt.tight_layout()
+
+plt.show()
+
+
+plt.figure(
+    figsize=(7, 5)
 )
 
 plt.plot(
-    range(1, NUM_TEST_IMAGES + 1),
-    sbl_mse,
-    marker="o",
-    label="SBL"
+    range(1, EPOCHS + 1),
+    mse_history,
+    marker="o"
 )
 
-plt.xlabel("Test Image")
-plt.ylabel("MSE")
-plt.title("MSE for Each Test Image")
+plt.xlabel(
+    "Epoch"
+)
 
-plt.legend()
+plt.ylabel(
+    "MSE"
+)
+
+plt.title(
+    "GAN MSE vs Epoch"
+)
+
 plt.grid()
 
-plt.tight_layout()
 plt.show()
 
 
-results = [
-    ["Method", "MSE", "NMSE", "dB", "PSNR"],
-    [
-        "LASSO",
-        avg_lasso_mse,
-        avg_lasso_nmse,
-        avg_lasso_db,
-        avg_lasso_psnr
-    ],
-    [
-        "SBL",
-        avg_sbl_mse,
-        avg_sbl_nmse,
-        avg_sbl_db,
-        avg_sbl_psnr
-    ],
-    [
-        "DNN/GAN",
-        DNN_MSE,
-        DNN_NMSE,
-        DNN_DB,
-        ""
-    ]
-]
+plt.figure(
+    figsize=(7, 5)
+)
 
+plt.plot(
+    range(1, EPOCHS + 1),
+    nmse_db_history,
+    marker="o"
+)
 
-with open(
-    "sparse_recovery_comparison.csv",
-    "w",
-    newline=""
-) as f:
+plt.xlabel(
+    "Epoch"
+)
 
-    writer = csv.writer(f)
+plt.ylabel(
+    "Normalized MSE (dB)"
+)
 
-    writer.writerows(results)
+plt.title(
+    "GAN NMSE vs Epoch"
+)
 
+plt.grid()
 
-print()
-print("Results saved to:")
-print("sparse_recovery_comparison.csv")
+plt.show()
