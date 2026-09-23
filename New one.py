@@ -78,7 +78,6 @@ x_test = load_images(
     DATA_PATH + r"\t10k-images.idx3-ubyte"
 )
 
-
 y_train_labels = load_labels(
     DATA_PATH + r"\train-labels.idx1-ubyte"
 )
@@ -89,6 +88,7 @@ y_test_labels = load_labels(
 
 
 x_train = x_train[:TRAIN_SAMPLES]
+
 x_test = x_test[:TEST_SAMPLES]
 
 
@@ -216,32 +216,26 @@ for i in range(TEST_SAMPLES):
 
     measurement = y_test[i]
 
-
     model = Lasso(
         alpha=LASSO_ALPHA,
         max_iter=10000,
         fit_intercept=False
     )
 
-
     model.fit(
         B,
         measurement
     )
 
-
     dct_coefficients = model.coef_
 
-
     reconstructed = D @ dct_coefficients
-
 
     reconstructed = np.clip(
         reconstructed,
         0,
         1
     )
-
 
     lasso_reconstructed.append(
         reconstructed
@@ -273,18 +267,26 @@ def sbl_reconstruction(
 
     m, n = B.shape
 
-
     gamma = np.ones(
         n,
         dtype=np.float64
     )
 
+    y = y.astype(
+        np.float64
+    )
+
+    B = B.astype(
+        np.float64
+    )
 
     for iteration in range(iterations):
 
-
-        BG = B * gamma[np.newaxis, :]
-
+        BG = (
+            B
+            *
+            gamma[np.newaxis, :]
+        )
 
         C = (
             BG @ B.T
@@ -292,48 +294,50 @@ def sbl_reconstruction(
             noise * np.eye(m)
         )
 
-
         try:
 
-            C_inv = np.linalg.inv(C)
+            C_inv = np.linalg.solve(
+                C,
+                np.eye(m)
+            )
 
         except np.linalg.LinAlgError:
 
             C_inv = np.linalg.pinv(C)
 
-
-        mu = (
-            gamma[:, None]
-            *
-            B.T
-            @
-            C_inv
-            @
-            y
+        temp = (
+            C_inv @ y
         )
 
+        mu = (
+            gamma
+            *
+            (
+                B.T @ temp
+            )
+        )
+
+        C_inv_B = (
+            C_inv @ B
+        )
+
+        diagonal = np.sum(
+            B * C_inv_B,
+            axis=0
+        )
 
         Sigma = (
             gamma
             -
             gamma**2
             *
-            np.sum(
-                B.T
-                *
-                (
-                    C_inv @ B.T
-                ),
-                axis=1
-            )
+            diagonal
         )
-
 
         Sigma = np.maximum(
             Sigma,
             0
         )
-
 
         gamma_new = (
             mu**2
@@ -341,12 +345,15 @@ def sbl_reconstruction(
             Sigma
         )
 
-
         gamma_new = np.maximum(
             gamma_new,
             1e-12
         )
 
+        gamma_new = np.minimum(
+            gamma_new,
+            1e12
+        )
 
         difference = np.mean(
             np.abs(
@@ -354,14 +361,11 @@ def sbl_reconstruction(
             )
         )
 
-
         gamma = gamma_new
-
 
         if difference < 1e-6:
 
             break
-
 
     return mu
 
@@ -371,8 +375,14 @@ sbl_reconstructed = []
 
 for i in range(TEST_SAMPLES):
 
-    measurement = y_test[i]
+    print(
+        "SBL image",
+        i + 1,
+        "/",
+        TEST_SAMPLES
+    )
 
+    measurement = y_test[i]
 
     sbl_coefficients = sbl_reconstruction(
         B,
@@ -381,16 +391,13 @@ for i in range(TEST_SAMPLES):
         noise=SBL_NOISE
     )
 
-
     reconstructed = D @ sbl_coefficients
-
 
     reconstructed = np.clip(
         reconstructed,
         0,
         1
     )
-
 
     sbl_reconstructed.append(
         reconstructed
@@ -477,27 +484,22 @@ def train_step(
     real_images
 ):
 
-
     with tf.GradientTape() as d_tape:
-
 
         fake_images = generator(
             measurements,
             training=True
         )
 
-
         real_output = discriminator(
             real_images,
             training=True
         )
 
-
         fake_output = discriminator(
             fake_images,
             training=True
         )
-
 
         d_real_loss = bce(
             tf.ones_like(
@@ -506,7 +508,6 @@ def train_step(
             real_output
         )
 
-
         d_fake_loss = bce(
             tf.zeros_like(
                 fake_output
@@ -514,19 +515,16 @@ def train_step(
             fake_output
         )
 
-
         d_loss = (
             d_real_loss
             +
             d_fake_loss
         )
 
-
     d_gradients = d_tape.gradient(
         d_loss,
         discriminator.trainable_variables
     )
-
 
     d_optimizer.apply_gradients(
         zip(
@@ -535,21 +533,17 @@ def train_step(
         )
     )
 
-
     with tf.GradientTape() as g_tape:
-
 
         fake_images = generator(
             measurements,
             training=True
         )
 
-
         fake_output = discriminator(
             fake_images,
             training=True
         )
-
 
         reconstruction_loss = tf.reduce_mean(
             tf.square(
@@ -559,14 +553,12 @@ def train_step(
             )
         )
 
-
         adversarial_loss = bce(
             tf.ones_like(
                 fake_output
             ),
             fake_output
         )
-
 
         g_loss = (
             reconstruction_loss
@@ -576,12 +568,10 @@ def train_step(
             adversarial_loss
         )
 
-
     g_gradients = g_tape.gradient(
         g_loss,
         generator.trainable_variables
     )
-
 
     g_optimizer.apply_gradients(
         zip(
@@ -589,7 +579,6 @@ def train_step(
             generator.trainable_variables
         )
     )
-
 
     return (
         d_loss,
@@ -619,37 +608,30 @@ print("Starting GAN training...")
 
 for epoch in range(EPOCHS):
 
-
     d_losses = []
 
     g_losses = []
 
     reconstruction_losses = []
 
-
     for measurements, real_images in dataset:
-
 
         d_loss, g_loss, rec_loss = train_step(
             measurements,
             real_images
         )
 
-
         d_losses.append(
             d_loss.numpy()
         )
-
 
         g_losses.append(
             g_loss.numpy()
         )
 
-
         reconstruction_losses.append(
             rec_loss.numpy()
         )
-
 
     print(
         "Epoch",
@@ -704,18 +686,15 @@ def calculate_metrics(
     reconstructed
 ):
 
-
     mse_values = []
 
     nmse_values = []
 
     nmse_db_values = []
 
-
     for i in range(
         len(original)
     ):
-
 
         error = (
             original[i]
@@ -723,22 +702,32 @@ def calculate_metrics(
             reconstructed[i]
         )
 
-
         mse = np.mean(
             error ** 2
         )
 
-
-        nmse = (
-            np.sum(
-                error ** 2
-            )
-            /
-            np.sum(
-                original[i] ** 2
-            )
+        denominator = np.sum(
+            original[i] ** 2
         )
 
+        if denominator <= 1e-12:
+
+            nmse = 0.0
+
+        else:
+
+            nmse = (
+                np.sum(
+                    error ** 2
+                )
+                /
+                denominator
+            )
+
+        nmse = max(
+            nmse,
+            1e-12
+        )
 
         nmse_db = (
             10
@@ -747,7 +736,6 @@ def calculate_metrics(
                 nmse
             )
         )
-
 
         mse_values.append(
             mse
@@ -760,7 +748,6 @@ def calculate_metrics(
         nmse_db_values.append(
             nmse_db
         )
-
 
     return (
         np.mean(mse_values),
@@ -795,23 +782,59 @@ print("======================================")
 
 print()
 print("DCT-LASSO")
-print("MSE:", lasso_mse)
-print("NMSE:", lasso_nmse)
-print("NMSE (dB):", lasso_db)
+
+print(
+    "MSE:",
+    lasso_mse
+)
+
+print(
+    "NMSE:",
+    lasso_nmse
+)
+
+print(
+    "NMSE (dB):",
+    lasso_db
+)
 
 
 print()
 print("DCT-SBL")
-print("MSE:", sbl_mse)
-print("NMSE:", sbl_nmse)
-print("NMSE (dB):", sbl_db)
+
+print(
+    "MSE:",
+    sbl_mse
+)
+
+print(
+    "NMSE:",
+    sbl_nmse
+)
+
+print(
+    "NMSE (dB):",
+    sbl_db
+)
 
 
 print()
 print("GAN")
-print("MSE:", gan_mse)
-print("NMSE:", gan_nmse)
-print("NMSE (dB):", gan_db)
+
+print(
+    "MSE:",
+    gan_mse
+)
+
+print(
+    "NMSE:",
+    gan_nmse
+)
+
+print(
+    "NMSE (dB):",
+    gan_db
+)
 
 
 methods = [
